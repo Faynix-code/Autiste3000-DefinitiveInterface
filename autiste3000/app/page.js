@@ -9,6 +9,8 @@ export default function Home() {
   const [sensorValues, setSensorValues] = useState({});
   // Stocker l'historique des données pour les graphiques
   const [chartData, setChartData] = useState([]);
+  // Stocker l'historique complet pour le filtrage temporel
+  const chartDataFullRef = useRef([]);
   // État de connexion WebSocket
   const [status, setStatus] = useState("Déconnecté");
   // Historique des messages bruts reçus
@@ -21,18 +23,47 @@ export default function Home() {
   const [serverUrl, setServerUrl] = useState("ws://localhost:8765/");
   // Debug: Compteur de messages reçus
   const [messageCount, setMessageCount] = useState(0);
+  // Compteur de tentatives de reconnexion
+  const reconnectAttemptsRef = useRef(0);
+  // Identifiant du timer de reconnexion
+  const reconnectTimerRef = useRef(null);
+  // Flag pour savoir si on est en train de se reconnecter
+  const isReconnectingRef = useRef(false);
+  // Flag pour indiquer si la déconnexion est volontaire
+  const isIntentionalDisconnectRef = useRef(false);
+  // Timestamp de la dernière notification
+  const lastNotificationRef = useRef(0);
   
   // Buffer pour stocker temporairement les données entre les rendus
   const dataBufferRef = useRef({});
   // Timer pour l'échantillonnage des données
   const samplingTimerRef = useRef(null);
+  // Timer pour le rafraîchissement de l'affichage
+  const displayRefreshTimerRef = useRef(null);
   // Timestamp de la dernière mise à jour du graphique
   const lastUpdateRef = useRef(Date.now());
   // Variables non-rendues pour optimiser les performances
   const samplingInterval = 1000; // Intervalle d'échantillonnage en ms
-  const maxDataPoints = 100; // Nombre maximal de points sur le graphique
+  const displayRefreshInterval = 1000; // Rafraîchissement de l'affichage en ms
+  const maxDataPoints = 100; // Nombre maximal de points dans l'historique complet
+  const dataTimeWindow = 15000; // Fenêtre temporelle pour l'affichage (15 secondes)
   
-  // Échantillonnage des données et mise à jour du graphique
+  // Fonction pour filtrer les données selon la fenêtre temporelle
+  const filterDataByTimeWindow = () => {
+    const now = Date.now();
+    const cutoffTime = now - dataTimeWindow;
+    
+    // Convertir les timestamps de chaîne à objets Date pour la comparaison
+    const filteredData = chartDataFullRef.current.filter(dataPoint => {
+      // Chaque point doit avoir un timestamp réel stocké
+      return dataPoint.rawTimestamp && dataPoint.rawTimestamp > cutoffTime;
+    });
+    
+    // Mettre à jour l'état du graphique avec les données filtrées
+    setChartData(filteredData);
+  };
+  
+  // Échantillonnage des données et mise à jour de l'historique complet
   const updateChartData = () => {
     const now = Date.now();
     const buffer = dataBufferRef.current;
@@ -43,7 +74,10 @@ export default function Home() {
       
       // Création d'un nouveau point avec toutes les données accumulées
       // On utilise la moyenne des valeurs accumulées pour chaque capteur
-      const newPoint = { timestamp };
+      const newPoint = { 
+        timestamp,
+        rawTimestamp: now // Stocker le timestamp brut pour filtrage temporel
+      };
       
       Object.entries(buffer).forEach(([sensor, values]) => {
         if (values.length > 0) {
@@ -53,11 +87,11 @@ export default function Home() {
         }
       });
       
-      // Mise à jour du graphique de manière optimisée
-      setChartData(prevData => {
-        const newData = [...prevData, newPoint];
-        return newData.slice(-maxDataPoints);
-      });
+      // Mise à jour de l'historique complet de manière optimisée
+      chartDataFullRef.current = [...chartDataFullRef.current, newPoint].slice(-maxDataPoints);
+      
+      // Filtrer les données selon la fenêtre temporelle
+      filterDataByTimeWindow();
       
       // Réinitialiser le buffer après utilisation
       dataBufferRef.current = {};
@@ -66,19 +100,64 @@ export default function Home() {
     lastUpdateRef.current = now;
   };
   
+  // Fonction pour déterminer le délai avant nouvelle tentative (backoff exponentiel)
+  const getReconnectDelay = () => {
+    const baseDelay = 1000; // 1 seconde
+    const maxDelay = 30000; // 30 secondes maximum
+    const attempts = reconnectAttemptsRef.current;
+    
+    // Formule de backoff exponentiel: baseDelay * 2^attempts avec un max
+    const delay = Math.min(baseDelay * Math.pow(2, attempts), maxDelay);
+    console.log(`Tentative de reconnexion ${attempts+1}, délai: ${delay}ms`);
+    return delay;
+  };
+  
+  // Fonction de notification avec limitation
+  const showNotification = (message, type = 'info') => {
+    const now = Date.now();
+    // Limiter les notifications à une toutes les 5 secondes
+    if (now - lastNotificationRef.current > 5000) {
+      if (type === 'success') toast.success(message);
+      else if (type === 'error') toast.error(message);
+      else toast.info(message);
+      
+      lastNotificationRef.current = now;
+    }
+  };
+  
   // Fonction de connexion WebSocket avec reconnexion automatique
   const connectWebSocket = () => {
+    // Éviter les connexions multiples simultanées
+    if (isReconnectingRef.current) return;
+    
     try {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      isReconnectingRef.current = true;
+      
+      // Nettoyer toute connexion existante
+      if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+        isIntentionalDisconnectRef.current = true;
         wsRef.current.close();
+        isIntentionalDisconnectRef.current = false;
       }
 
       console.log("Tentative de connexion à", serverUrl);
+      setStatus("Connexion en cours...");
+      
       const socket = new WebSocket(serverUrl);
 
       socket.onopen = () => {
         setStatus("Connecté 🔗");
-        toast.success("Connexion établie");
+        // Réinitialiser le compteur de tentatives après une connexion réussie
+        reconnectAttemptsRef.current = 0;
+        isReconnectingRef.current = false;
+        
+        // Afficher une notification seulement si ce n'est pas la première connexion
+        if (messageCount > 0) {
+          showNotification("Connexion rétablie", "success");
+        } else {
+          showNotification("Connexion établie", "success");
+        }
+        
         console.log("WebSocket ouvert");
         
         // Démarrer l'échantillonnage périodique
@@ -86,24 +165,54 @@ export default function Home() {
           clearInterval(samplingTimerRef.current);
         }
         samplingTimerRef.current = setInterval(updateChartData, samplingInterval);
+        
+        // Démarrer le rafraîchissement de l'affichage
+        if (displayRefreshTimerRef.current) {
+          clearInterval(displayRefreshTimerRef.current);
+        }
+        displayRefreshTimerRef.current = setInterval(filterDataByTimeWindow, displayRefreshInterval);
       };
 
       socket.onclose = (event) => {
         setStatus("Déconnecté ❌");
+        isReconnectingRef.current = false;
         console.log("WebSocket fermé", event);
         
-        // Arrêter l'échantillonnage
+        // Arrêter l'échantillonnage et le rafraîchissement
         if (samplingTimerRef.current) {
           clearInterval(samplingTimerRef.current);
         }
+        if (displayRefreshTimerRef.current) {
+          clearInterval(displayRefreshTimerRef.current);
+        }
         
-        // Tentative de reconnexion après 3 secondes
-        setTimeout(connectWebSocket, 3000);
+        // Éviter la reconnexion si la fermeture était intentionnelle
+        if (!isIntentionalDisconnectRef.current) {
+          // Incrémenter le compteur de tentatives
+          reconnectAttemptsRef.current++;
+          
+          // Notification limitée
+          if (reconnectAttemptsRef.current === 1 || reconnectAttemptsRef.current % 5 === 0) {
+            showNotification("Connexion perdue. Tentative de reconnexion...", "error");
+          }
+          
+          // Nettoyage du timer précédent si existe
+          if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current);
+          }
+          
+          // Planifier la reconnexion avec backoff exponentiel
+          const delay = getReconnectDelay();
+          reconnectTimerRef.current = setTimeout(connectWebSocket, delay);
+        }
       };
 
       socket.onerror = (error) => {
         console.error("WebSocket Error:", error);
-        toast.error("Erreur de connexion");
+        // Éviter les notifications excessives pour les erreurs
+        if (reconnectAttemptsRef.current === 0) {
+          showNotification("Erreur de connexion", "error");
+        }
       };
 
       socket.onmessage = (event) => {
@@ -115,13 +224,13 @@ export default function Home() {
           
           // Gestion des alertes et messages système
           if (parsedData.alert) {
-            toast.info(parsedData.alert);
+            showNotification(parsedData.alert);
             setStatusMessage(parsedData.alert);
             return;
           }
           
           if (parsedData.system) {
-            toast.info(parsedData.message || "Message système reçu");
+            showNotification(parsedData.message || "Message système reçu");
             return;
           }
 
@@ -171,7 +280,12 @@ export default function Home() {
       wsRef.current = socket;
     } catch (error) {
       console.error("Erreur lors de la création du WebSocket:", error);
-      toast.error("Impossible de se connecter au serveur");
+      showNotification("Impossible de se connecter au serveur", "error");
+      isReconnectingRef.current = false;
+      
+      // Planifier une nouvelle tentative
+      const delay = getReconnectDelay();
+      reconnectTimerRef.current = setTimeout(connectWebSocket, delay);
     }
   };
 
@@ -180,12 +294,22 @@ export default function Home() {
 
     return () => {
       // Nettoyage
+      isIntentionalDisconnectRef.current = true;
+      
       if (wsRef.current) {
         wsRef.current.close();
       }
       
       if (samplingTimerRef.current) {
         clearInterval(samplingTimerRef.current);
+      }
+      
+      if (displayRefreshTimerRef.current) {
+        clearInterval(displayRefreshTimerRef.current);
+      }
+      
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
       }
     };
   }, [serverUrl]);
@@ -197,29 +321,34 @@ export default function Home() {
 
   // Fonction pour se reconnecter manuellement
   const handleReconnect = () => {
-    if (wsRef.current) {
-      wsRef.current.close();
+    // Réinitialiser le compteur de tentatives pour la reconnexion manuelle
+    reconnectAttemptsRef.current = 0;
+    
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
     }
+    
     connectWebSocket();
   };
 
   // Fonction pour effacer les données
   const handleClearData = () => {
     setChartData([]);
+    chartDataFullRef.current = [];
     setTextData([]);
     setSensorValues({});
     dataBufferRef.current = {};
     setMessageCount(0);
-    toast.info("Données effacées");
+    showNotification("Données effacées");
   };
 
   // Fonction pour envoyer un message test au serveur
   const handleTestMessage = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({type: "ping", timestamp: new Date().toISOString()}));
-      toast.info("Message de test envoyé");
+      showNotification("Message de test envoyé");
     } else {
-      toast.error("WebSocket non connecté");
+      showNotification("WebSocket non connecté", "error");
     }
   };
   
@@ -246,8 +375,13 @@ export default function Home() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <p className="mb-2">
-              Statut: <span className={`font-semibold ${status.includes("Connecté") ? "text-green-400" : "text-red-400"}`}>{status}</span>
+              Statut: <span className={`font-semibold ${status.includes("Connecté") ? "text-green-400" : status.includes("cours") ? "text-yellow-400" : "text-red-400"}`}>{status}</span>
               {" "}<small>({messageCount} messages reçus)</small>
+              {reconnectAttemptsRef.current > 0 && (
+                <span className="ml-2 text-yellow-400">
+                  Tentative {reconnectAttemptsRef.current}
+                </span>
+              )}
             </p>
             
             <div className="flex items-center gap-2">
@@ -309,7 +443,10 @@ export default function Home() {
 
       {/* Section des graphiques */}
       <div className="w-full max-w-4xl bg-gray-800 p-4 rounded-lg shadow-lg mb-6">
-        <h2 className="text-xl font-semibold mb-4">📈 Graphiques en Temps Réel</h2>
+        <h2 className="text-xl font-semibold mb-4">
+          📈 Graphiques en Temps Réel 
+          <span className="text-sm font-normal ml-2 text-gray-400">(15 dernières secondes)</span>
+        </h2>
         
         {chartData.length > 0 ? (
           <div className="overflow-x-auto">
