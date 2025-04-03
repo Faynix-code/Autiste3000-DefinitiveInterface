@@ -154,9 +154,7 @@ export default function Home() {
         // Afficher une notification seulement si ce n'est pas la première connexion
         if (messageCount > 0) {
           showNotification("Connexion rétablie", "success");
-        } else {
-          showNotification("Connexion établie", "success");
-        }
+        } 
         
         console.log("WebSocket ouvert");
         
