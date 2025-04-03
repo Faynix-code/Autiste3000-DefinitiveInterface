@@ -13,7 +13,7 @@ export default function Home() {
 
   // Fonction de connexion WebSocket avec reconnexion automatique
   const connectWebSocket = () => {
-    const socket = new WebSocket("ws://localhost:8765");
+    const socket = new WebSocket("ws://localhost:8765/");
 
     socket.onopen = () => {
       setStatus("Connecté 🔗");
