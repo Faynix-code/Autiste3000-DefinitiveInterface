@@ -50,6 +50,11 @@ class MicrobitWebSocketServer:
                         print(f"Micro:bit détectée sur Linux avec description: {port.device}")
                         return port.device
         
+        # Si aucun port trouvé, afficher la liste des ports disponibles pour le débogage
+        print("Ports disponibles:")
+        for port in ports:
+            print(f" - {port.device}: {port.description}")
+            
         return None
 
     def start_serial_thread(self):
@@ -78,6 +83,16 @@ class MicrobitWebSocketServer:
                             )
                             self.connected = True
                             print("🔌 Port série ouvert")
+                            
+                            # Envoi de message de confirmation de connexion
+                            self.message_queue.put({"system": True, "message": f"Micro:bit connectée sur {port}"})
+                            
+                            # Données d'exemple pour tester le frontend si nécessaire
+                            # Décommenter pour envoyer des données de test
+                            self.message_queue.put({"name": "temp", "value": 22.5, "raw_data": "temp,22.5"})
+                            time.sleep(0.5)
+                            self.message_queue.put({"name": "light", "value": 67, "raw_data": "light,67"})
+                            
                             reconnect_delay = 3  # Réinitialisation du délai de reconnexion
                             self.read_serial()  # Cette fonction est bloquante jusqu'à déconnexion
                         except serial.SerialException as e:
@@ -96,6 +111,17 @@ class MicrobitWebSocketServer:
                                 self.serial_port = None
                 else:
                     print(f"⚠️ Aucune Micro:bit détectée... Nouvelle tentative dans {reconnect_delay}s")
+                    
+                    # Si aucune Micro:bit n'est trouvée, envoyer un message de simulation pour tester le frontend
+                    if self.websocket_clients:
+                        # Envoi d'un message simulé toutes les 5 secondes quand aucune Micro:bit n'est connectée
+                        if time.time() % 5 < 0.1:  # Pour éviter d'envoyer trop de messages
+                            import random
+                            self.message_queue.put({
+                                "name": "simulated", 
+                                "value": random.uniform(0, 100), 
+                                "raw_data": "simulated," + str(random.uniform(0, 100))
+                            })
             except Exception as e:
                 print(f"❌ Erreur de connexion série : {e}")
                 self.connected = False
@@ -169,10 +195,11 @@ class MicrobitWebSocketServer:
                 try:
                     value = float(value)
                 except ValueError:
-                    value = data  # Si la valeur n'est pas un nombre, la traiter comme une chaîne
+                    value = value  # Si la valeur n'est pas un nombre, la traiter comme une chaîne
                 
                 message = {"name": name, "value": value, "raw_data": data}
                 self.message_queue.put(message)
+                print(f"✅ Données traitées: {name}={value}")
 
                 # Gestion des alertes "status,1" et "status,2"
                 if name == "status":
@@ -183,6 +210,10 @@ class MicrobitWebSocketServer:
                 return True
             except Exception as e:
                 print(f"❌ Erreur de traitement des données : {e}")
+        else:
+            # Même si le format n'est pas correct, envoyer quand même un message
+            # pour que le frontend puisse voir qu'il y a de l'activité
+            self.message_queue.put({"raw_text": data})
         return False
 
     async def broadcast(self, message):
@@ -192,9 +223,12 @@ class MicrobitWebSocketServer:
                 msg_json = json.dumps(message)
                 await asyncio.gather(*(client.send(msg_json) for client in self.websocket_clients))
                 print(f"📤 Envoyé à {len(self.websocket_clients)} clients : {msg_json}")
+                return True
             except Exception as e:
                 print(f"❌ Erreur de connexion WebSocket lors de l'envoi : {e}")
                 await self.remove_closed_connections()
+                return False
+        return False
 
     async def process_queue(self):
         """Traite les messages en attente dans la file d'attente."""
@@ -203,7 +237,11 @@ class MicrobitWebSocketServer:
                 # Vérifier s'il y a des messages dans la file d'attente sans bloquer
                 if not self.message_queue.empty():
                     message = self.message_queue.get_nowait()
-                    await self.broadcast(message)
+                    success = await self.broadcast(message)
+                    if not success and 'system' not in message:
+                        # Si l'envoi échoue et que ce n'est pas un message système,
+                        # remettre dans la queue pour réessayer plus tard
+                        self.message_queue.put(message)
                 await asyncio.sleep(0.1)  # Petite pause pour ne pas surcharger la CPU
             except queue.Empty:
                 pass  # La file est vide, c'est normal
@@ -217,17 +255,45 @@ class MicrobitWebSocketServer:
         self.websocket_clients.add(websocket)
         
         # Envoyer un message de bienvenue
-        welcome_msg = {"system": "connected", "message": "Connexion établie avec le serveur"}
+        welcome_msg = {"system": True, "message": "Connexion établie avec le serveur"}
         try:
             await websocket.send(json.dumps(welcome_msg))
-        except Exception as e:
-            print(f"❌ Erreur lors de l'envoi du message de bienvenue: {e}")
-        
-        try:
-            # Attendre que la connexion se ferme
-            await websocket.wait_closed()
+            
+            # Envoyer l'état de la Micro:bit
+            if self.connected:
+                await websocket.send(json.dumps({
+                    "system": True,
+                    "message": "Micro:bit connectée et prête"
+                }))
+            else:
+                await websocket.send(json.dumps({
+                    "system": True,
+                    "message": "En attente de connexion à une Micro:bit"
+                }))
+                
+            # Écouter les messages venant du client
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    print(f"📩 Message reçu du client: {data}")
+                    
+                    # Traiter les messages du client (si nécessaire)
+                    if data.get('type') == 'ping':
+                        await websocket.send(json.dumps({
+                            "system": True,
+                            "message": "Pong",
+                            "timestamp": data.get('timestamp')
+                        }))
+                    
+                except json.JSONDecodeError:
+                    print(f"❌ Message non-JSON reçu: {message}")
+                except Exception as e:
+                    print(f"❌ Erreur de traitement du message client: {e}")
+                    
         except websockets.exceptions.ConnectionClosedError as e:
             print(f"❌ Erreur de connexion WebSocket : {e}")
+        except Exception as e:
+            print(f"❌ Erreur inattendue dans le gestionnaire WebSocket: {e}")
         finally:
             self.websocket_clients.remove(websocket)
             print(f"❌ Client déconnecté : {remote}")
@@ -239,6 +305,17 @@ class MicrobitWebSocketServer:
         after = len(self.websocket_clients)
         if before != after:
             print(f"🧹 Nettoyage : {before - after} connexions fermées ont été supprimées")
+
+    async def heartbeat(self):
+        """Envoie périodiquement un message pour vérifier que la connexion est toujours active."""
+        while self.running:
+            if self.websocket_clients:
+                await self.broadcast({
+                    "system": True, 
+                    "heartbeat": True, 
+                    "timestamp": time.time()
+                })
+            await asyncio.sleep(30)  # Envoyer un heartbeat toutes les 30 secondes
 
     async def start_server(self):
         """Démarre le serveur WebSocket."""
@@ -268,6 +345,9 @@ class MicrobitWebSocketServer:
                     await asyncio.sleep(60)  # Exécution toutes les minutes
             
             cleanup_task = asyncio.create_task(periodic_cleanup())
+            
+            # Démarrer le heartbeat
+            heartbeat_task = asyncio.create_task(self.heartbeat())
 
             # Attendre que le serveur soit fermé
             await websocket_server.wait_closed()
