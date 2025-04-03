@@ -242,7 +242,7 @@ class MicrobitWebSocketServer:
                         # Si l'envoi échoue et que ce n'est pas un message système,
                         # remettre dans la queue pour réessayer plus tard
                         self.message_queue.put(message)
-                await asyncio.sleep(0.1)  # Petite pause pour ne pas surcharger la CPU
+                await asyncio.sleep(0.01)  # Petite pause pour ne pas surcharger la CPU
             except queue.Empty:
                 pass  # La file est vide, c'est normal
             except Exception as e:
