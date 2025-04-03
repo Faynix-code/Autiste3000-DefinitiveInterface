@@ -19,49 +19,53 @@ export default function Home() {
   const wsRef = useRef(null);
   // Configuration du serveur
   const [serverUrl, setServerUrl] = useState("ws://localhost:8765/");
-  // Compteur pour ajouter un index aux points du graphique
-  const dataPointIndex = useRef(0);
   // Debug: Compteur de messages reçus
   const [messageCount, setMessageCount] = useState(0);
   
-  // Buffer pour accumuler les données dans un même intervalle de temps
-  const dataBuffer = useRef({});
-  // Timer pour regrouper les données
-  const bufferTimer = useRef(null);
-
-  // Liste des types de capteurs attendus
-  const expectedSensors = ["temperature", "niveausonore", "signal", "accelerationx", "accelerationy"];
-
-  // Fonction pour traiter et enregistrer les données bufferisées
-  const processBufferedData = () => {
-    const currentBuffer = dataBuffer.current;
+  // Buffer pour stocker temporairement les données entre les rendus
+  const dataBufferRef = useRef({});
+  // Timer pour l'échantillonnage des données
+  const samplingTimerRef = useRef(null);
+  // Timestamp de la dernière mise à jour du graphique
+  const lastUpdateRef = useRef(Date.now());
+  // Variables non-rendues pour optimiser les performances
+  const samplingInterval = 1000; // Intervalle d'échantillonnage en ms
+  const maxDataPoints = 100; // Nombre maximal de points sur le graphique
+  
+  // Échantillonnage des données et mise à jour du graphique
+  const updateChartData = () => {
+    const now = Date.now();
+    const buffer = dataBufferRef.current;
     
-    if (Object.keys(currentBuffer).length > 0) {
-      const timestamp = new Date().toLocaleTimeString();
+    // Créer un point de données seulement s'il y a des données dans le buffer
+    if (Object.keys(buffer).length > 0) {
+      const timestamp = new Date(now).toLocaleTimeString();
       
-      // Création d'un nouveau point de données avec toutes les valeurs bufferisées
-      const newDataPoint = {
-        id: dataPointIndex.current++,
-        timestamp
-      };
-
-      // Fusionner toutes les valeurs du buffer dans ce point
-      Object.entries(currentBuffer).forEach(([name, value]) => {
-        newDataPoint[name] = value;
+      // Création d'un nouveau point avec toutes les données accumulées
+      // On utilise la moyenne des valeurs accumulées pour chaque capteur
+      const newPoint = { timestamp };
+      
+      Object.entries(buffer).forEach(([sensor, values]) => {
+        if (values.length > 0) {
+          // Calculer la moyenne des valeurs pour ce capteur
+          const sum = values.reduce((acc, val) => acc + val, 0);
+          newPoint[sensor] = sum / values.length;
+        }
       });
-
-      // Mettre à jour le graphique
-      setChartData(prev => {
-        const newData = [...prev, newDataPoint];
-        // Garder seulement les 50 derniers points pour éviter une surcharge
-        return newData.slice(-50);
+      
+      // Mise à jour du graphique de manière optimisée
+      setChartData(prevData => {
+        const newData = [...prevData, newPoint];
+        return newData.slice(-maxDataPoints);
       });
-
-      // Réinitialiser le buffer
-      dataBuffer.current = {};
+      
+      // Réinitialiser le buffer après utilisation
+      dataBufferRef.current = {};
     }
+    
+    lastUpdateRef.current = now;
   };
-
+  
   // Fonction de connexion WebSocket avec reconnexion automatique
   const connectWebSocket = () => {
     try {
@@ -76,11 +80,23 @@ export default function Home() {
         setStatus("Connecté 🔗");
         toast.success("Connexion établie");
         console.log("WebSocket ouvert");
+        
+        // Démarrer l'échantillonnage périodique
+        if (samplingTimerRef.current) {
+          clearInterval(samplingTimerRef.current);
+        }
+        samplingTimerRef.current = setInterval(updateChartData, samplingInterval);
       };
 
       socket.onclose = (event) => {
         setStatus("Déconnecté ❌");
         console.log("WebSocket fermé", event);
+        
+        // Arrêter l'échantillonnage
+        if (samplingTimerRef.current) {
+          clearInterval(samplingTimerRef.current);
+        }
+        
         // Tentative de reconnexion après 3 secondes
         setTimeout(connectWebSocket, 3000);
       };
@@ -91,22 +107,19 @@ export default function Home() {
       };
 
       socket.onmessage = (event) => {
-        setMessageCount(prev => prev + 1); // Debug: incrémenter le compteur
-        console.log("Message brut reçu:", event.data);
+        // Incrémenter le compteur de messages
+        setMessageCount(prev => prev + 1);
         
         try {
           const parsedData = JSON.parse(event.data);
-          console.log("Message parsé:", parsedData);
-
-          // Gestion des alertes de statut
+          
+          // Gestion des alertes et messages système
           if (parsedData.alert) {
-            // Affichage des alertes
             toast.info(parsedData.alert);
             setStatusMessage(parsedData.alert);
             return;
           }
-
-          // Si c'est un message système ou de bienvenue
+          
           if (parsedData.system) {
             toast.info(parsedData.message || "Message système reçu");
             return;
@@ -115,47 +128,43 @@ export default function Home() {
           // Traitement des données de capteurs
           if (parsedData.name && parsedData.value !== undefined) {
             const timestamp = new Date().toLocaleTimeString();
+            const sensorName = parsedData.name;
+            const sensorValue = typeof parsedData.value === 'string' ? 
+              parseFloat(parsedData.value) : parsedData.value;
             
-            // Debug
-            console.log(`Mise à jour de ${parsedData.name} avec la valeur ${parsedData.value}`);
+            // Mise à jour des valeurs actuelles (rendu moins fréquent)
+            setSensorValues(prev => ({
+              ...prev,
+              [sensorName]: sensorValue
+            }));
             
-            // Mise à jour des dernières valeurs
-            setSensorValues(prev => {
-              const newValues = {
-                ...prev,
-                [parsedData.name]: parsedData.value
-              };
-              console.log("Nouvelles valeurs de capteurs:", newValues);
-              return newValues;
-            });
-
-            // Ajouter au buffer
-            dataBuffer.current[parsedData.name] = parsedData.value;
+            // Ajouter la valeur au buffer pour l'échantillonnage
+            if (!dataBufferRef.current[sensorName]) {
+              dataBufferRef.current[sensorName] = [];
+            }
+            dataBufferRef.current[sensorName].push(sensorValue);
             
-            // Réinitialiser le timer à chaque nouvelle donnée
-            clearTimeout(bufferTimer.current);
-            bufferTimer.current = setTimeout(processBufferedData, 1000);
+            // Limiter la quantité de logs de texte pour éviter la surcharge
+            // Échantillonnage des logs textuels (1 sur 10 messages)
+            if (Math.random() < 0.1) {
+              const rawDataMessage = parsedData.raw_data || `${sensorName},${sensorValue}`;
+              setTextData(prev => {
+                const newTextData = [...prev, `[${timestamp}] ${rawDataMessage}`];
+                return newTextData.slice(-100);
+              });
+            }
 
-            // Ajout aux données textuelles
-            setTextData(prev => {
-              const rawDataMessage = parsedData.raw_data || `${parsedData.name},${parsedData.value}`;
-              const newTextData = [...prev, `[${timestamp}] ${rawDataMessage}`];
-              return newTextData.slice(-100); // Limiter à 100 entrées
-            });
-
-            // Vérification spécifique pour "status"
-            if (parsedData.name === "status") {
-              if (parsedData.value === 1) {
+            // Traitement spécial pour le statut
+            if (sensorName === "status") {
+              if (sensorValue === 1) {
                 setStatusMessage("L'autiste va bien 😊");
-              } else if (parsedData.value === 2) {
+              } else if (sensorValue === 2) {
                 setStatusMessage("L'autiste ne va pas bien 😟");
               }
             }
-          } else {
-            console.warn("Message reçu sans nom ou valeur:", parsedData);
           }
         } catch (error) {
-          console.error("Erreur de parsing JSON:", error, "Données brutes:", event.data);
+          console.error("Erreur de parsing JSON:", error);
         }
       };
 
@@ -167,16 +176,16 @@ export default function Home() {
   };
 
   useEffect(() => {
-    connectWebSocket(); // Initialisation de la connexion WebSocket
+    connectWebSocket();
 
     return () => {
-      // Nettoyage lorsque le composant est démonté
+      // Nettoyage
       if (wsRef.current) {
         wsRef.current.close();
       }
       
-      if (bufferTimer.current) {
-        clearTimeout(bufferTimer.current);
+      if (samplingTimerRef.current) {
+        clearInterval(samplingTimerRef.current);
       }
     };
   }, [serverUrl]);
@@ -199,9 +208,8 @@ export default function Home() {
     setChartData([]);
     setTextData([]);
     setSensorValues({});
-    dataPointIndex.current = 0;
-    setMessageCount(0); // Reset du compteur de debug
-    dataBuffer.current = {}; // Vider le buffer
+    dataBufferRef.current = {};
+    setMessageCount(0);
     toast.info("Données effacées");
   };
 
@@ -312,30 +320,33 @@ export default function Home() {
               margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
             >
               <CartesianGrid strokeDasharray="3 3" stroke="#444" />
-              <XAxis dataKey="timestamp" stroke="#fff" />
+              <XAxis 
+                dataKey="timestamp" 
+                stroke="#fff"
+                interval="preserveStartEnd"
+                minTickGap={25}
+              />
               <YAxis stroke="#fff" />
               <Tooltip 
                 contentStyle={{ backgroundColor: '#2d3748', color: '#fff', border: 'none' }} 
-                formatter={(value, name) => [value.toFixed(2), name]}
+                formatter={(value, name) => [value !== undefined ? value.toFixed(2) : 'N/A', name]}
               />
               <Legend />
               
-              {/* Combiner les capteurs attendus et détectés pour s'assurer que tous sont affichés */}
-              {Array.from(new Set([
-                ...expectedSensors,
-                ...Array.from(new Set(chartData.flatMap(point => Object.keys(point))))
-              ])).filter(key => 
-                key !== 'id' && key !== 'timestamp'
+              {/* Lignes pour chaque type de capteur */}
+              {Object.keys(sensorValues).filter(name => 
+                name !== 'id' && name !== 'timestamp' && name !== 'status'
               ).map((sensorName) => (
                 <Line 
                   key={sensorName}
                   type="monotone" 
                   dataKey={sensorName}
                   stroke={getSensorColor(sensorName)}
-                  name={sensorName} 
+                  name={sensorName}
                   connectNulls={true}
-                  dot={{ r: 4 }}
-                  activeDot={{ r: 6 }}
+                  isAnimationActive={false} // Désactiver l'animation pour des performances améliorées
+                  dot={false} // Supprimer les points pour améliorer les performances
+                  activeDot={{ r: 4 }} // Garder un point actif pour l'interaction
                 />
               ))}
             </LineChart>
@@ -347,7 +358,7 @@ export default function Home() {
 
       {/* Section des données textuelles */}
       <div className="w-full max-w-4xl bg-gray-800 p-4 rounded-lg shadow-lg">
-        <h2 className="text-xl font-semibold mb-2">📄 Données brutes</h2>
+        <h2 className="text-xl font-semibold mb-2">📄 Données brutes (échantillonnées)</h2>
         <div className="bg-gray-700 p-4 rounded-lg max-h-60 overflow-y-auto">
           {textData.length > 0 ? (
             textData.map((item, index) => (
@@ -359,7 +370,12 @@ export default function Home() {
         </div>
       </div>
 
-      <ToastContainer position="bottom-right" theme="dark" />
+      <ToastContainer 
+        position="bottom-right" 
+        theme="dark" 
+        limit={3} 
+        autoClose={2000}
+      />
     </div>
   );
 }
