@@ -189,9 +189,9 @@ class MicrobitWebSocketServer:
             
         print(f"📥 Reçu : {data}")
         
-        if "," in data:
+        if ":" in data:
             try:
-                name, value = data.split(",", 1)
+                name, value = data.split(":", 1)
                 try:
                     value = float(value)
                 except ValueError:
