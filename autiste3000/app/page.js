@@ -23,6 +23,44 @@ export default function Home() {
   const dataPointIndex = useRef(0);
   // Debug: Compteur de messages reçus
   const [messageCount, setMessageCount] = useState(0);
+  
+  // Buffer pour accumuler les données dans un même intervalle de temps
+  const dataBuffer = useRef({});
+  // Timer pour regrouper les données
+  const bufferTimer = useRef(null);
+
+  // Liste des types de capteurs attendus
+  const expectedSensors = ["temperature", "niveausonore", "signal", "accelerationx", "accelerationy"];
+
+  // Fonction pour traiter et enregistrer les données bufferisées
+  const processBufferedData = () => {
+    const currentBuffer = dataBuffer.current;
+    
+    if (Object.keys(currentBuffer).length > 0) {
+      const timestamp = new Date().toLocaleTimeString();
+      
+      // Création d'un nouveau point de données avec toutes les valeurs bufferisées
+      const newDataPoint = {
+        id: dataPointIndex.current++,
+        timestamp
+      };
+
+      // Fusionner toutes les valeurs du buffer dans ce point
+      Object.entries(currentBuffer).forEach(([name, value]) => {
+        newDataPoint[name] = value;
+      });
+
+      // Mettre à jour le graphique
+      setChartData(prev => {
+        const newData = [...prev, newDataPoint];
+        // Garder seulement les 50 derniers points pour éviter une surcharge
+        return newData.slice(-50);
+      });
+
+      // Réinitialiser le buffer
+      dataBuffer.current = {};
+    }
+  };
 
   // Fonction de connexion WebSocket avec reconnexion automatique
   const connectWebSocket = () => {
@@ -91,20 +129,12 @@ export default function Home() {
               return newValues;
             });
 
-            // Ajout du point au graphique
-            const newDataPoint = {
-              id: dataPointIndex.current++,
-              timestamp,
-              [parsedData.name]: parsedData.value
-            };
-
-            setChartData(prev => {
-              const newData = [...prev, newDataPoint];
-              // Garder seulement les 50 derniers points pour éviter une surcharge
-              const result = newData.slice(-50);
-              console.log("Données graphique mises à jour:", result.length, "points");
-              return result;
-            });
+            // Ajouter au buffer
+            dataBuffer.current[parsedData.name] = parsedData.value;
+            
+            // Réinitialiser le timer à chaque nouvelle donnée
+            clearTimeout(bufferTimer.current);
+            bufferTimer.current = setTimeout(processBufferedData, 1000);
 
             // Ajout aux données textuelles
             setTextData(prev => {
@@ -140,8 +170,13 @@ export default function Home() {
     connectWebSocket(); // Initialisation de la connexion WebSocket
 
     return () => {
+      // Nettoyage lorsque le composant est démonté
       if (wsRef.current) {
-        wsRef.current.close(); // Assurer que la connexion WebSocket est fermée lors du démontage du composant
+        wsRef.current.close();
+      }
+      
+      if (bufferTimer.current) {
+        clearTimeout(bufferTimer.current);
       }
     };
   }, [serverUrl]);
@@ -166,6 +201,7 @@ export default function Home() {
     setSensorValues({});
     dataPointIndex.current = 0;
     setMessageCount(0); // Reset du compteur de debug
+    dataBuffer.current = {}; // Vider le buffer
     toast.info("Données effacées");
   };
 
@@ -177,6 +213,20 @@ export default function Home() {
     } else {
       toast.error("WebSocket non connecté");
     }
+  };
+  
+  // Génération de couleurs cohérentes pour chaque type de capteur
+  const getSensorColor = (sensorName) => {
+    const colorMap = {
+      temperature: "#ff7300",
+      niveau_sonore: "#82ca9d", 
+      signal: "#8884d8",
+      accelerationX: "#0088FE",
+      accelerationY: "#00C49F",
+      status: "#FFBB28"
+    };
+    
+    return colorMap[sensorName] || "#999999"; // Couleur par défaut
   };
 
   return (
@@ -236,7 +286,7 @@ export default function Home() {
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
           {Object.keys(sensorValues).length > 0 ? (
             Object.entries(sensorValues).map(([name, value]) => (
-              <div key={name} className="bg-gray-700 p-3 rounded-lg">
+              <div key={name} className="bg-gray-700 p-3 rounded-lg" style={{ borderLeft: `4px solid ${getSensorColor(name)}` }}>
                 <h3 className="font-medium text-gray-300">{name}</h3>
                 <p className="text-2xl font-bold">{typeof value === 'number' ? value.toFixed(2) : value}</p>
               </div>
@@ -255,31 +305,39 @@ export default function Home() {
         
         {chartData.length > 0 ? (
           <div className="overflow-x-auto">
-            <LineChart width={700} height={300} data={chartData}>
+            <LineChart 
+              width={700} 
+              height={300} 
+              data={chartData}
+              margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+            >
               <CartesianGrid strokeDasharray="3 3" stroke="#444" />
               <XAxis dataKey="timestamp" stroke="#fff" />
               <YAxis stroke="#fff" />
-              <Tooltip contentStyle={{ backgroundColor: '#2d3748', color: '#fff', border: 'none' }} />
+              <Tooltip 
+                contentStyle={{ backgroundColor: '#2d3748', color: '#fff', border: 'none' }} 
+                formatter={(value, name) => [value.toFixed(2), name]}
+              />
               <Legend />
               
-              {/* Créer dynamiquement les lignes pour chaque type de capteur */}
-              {Array.from(new Set(chartData.flatMap(point => Object.keys(point)))).filter(key => 
+              {/* Combiner les capteurs attendus et détectés pour s'assurer que tous sont affichés */}
+              {Array.from(new Set([
+                ...expectedSensors,
+                ...Array.from(new Set(chartData.flatMap(point => Object.keys(point))))
+              ])).filter(key => 
                 key !== 'id' && key !== 'timestamp'
-              ).map((sensorName, index) => {
-                // Couleurs pour les différentes lignes
-                const colors = ['#8884d8', '#82ca9d', '#ff7300', '#ffcc00', '#0088FE', '#00C49F', '#FFBB28'];
-                return (
-                  <Line 
-                    key={sensorName}
-                    type="monotone" 
-                    dataKey={sensorName}
-                    stroke={colors[index % colors.length]}
-                    name={sensorName} 
-                    dot={false}
-                    activeDot={{ r: 4 }}
-                  />
-                );
-              })}
+              ).map((sensorName) => (
+                <Line 
+                  key={sensorName}
+                  type="monotone" 
+                  dataKey={sensorName}
+                  stroke={getSensorColor(sensorName)}
+                  name={sensorName} 
+                  connectNulls={true}
+                  dot={{ r: 4 }}
+                  activeDot={{ r: 6 }}
+                />
+              ))}
             </LineChart>
           </div>
         ) : (
