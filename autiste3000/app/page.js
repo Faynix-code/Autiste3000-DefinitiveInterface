@@ -21,10 +21,17 @@ export default function Home() {
   const [serverUrl, setServerUrl] = useState("ws://localhost:8765/");
   // Compteur pour ajouter un index aux points du graphique
   const dataPointIndex = useRef(0);
+  // Debug: Compteur de messages reçus
+  const [messageCount, setMessageCount] = useState(0);
 
   // Fonction de connexion WebSocket avec reconnexion automatique
   const connectWebSocket = () => {
     try {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close();
+      }
+
+      console.log("Tentative de connexion à", serverUrl);
       const socket = new WebSocket(serverUrl);
 
       socket.onopen = () => {
@@ -46,9 +53,12 @@ export default function Home() {
       };
 
       socket.onmessage = (event) => {
+        setMessageCount(prev => prev + 1); // Debug: incrémenter le compteur
+        console.log("Message brut reçu:", event.data);
+        
         try {
           const parsedData = JSON.parse(event.data);
-          console.log("Message reçu:", parsedData);
+          console.log("Message parsé:", parsedData);
 
           // Gestion des alertes de statut
           if (parsedData.alert) {
@@ -68,11 +78,18 @@ export default function Home() {
           if (parsedData.name && parsedData.value !== undefined) {
             const timestamp = new Date().toLocaleTimeString();
             
+            // Debug
+            console.log(`Mise à jour de ${parsedData.name} avec la valeur ${parsedData.value}`);
+            
             // Mise à jour des dernières valeurs
-            setSensorValues(prev => ({
-              ...prev,
-              [parsedData.name]: parsedData.value
-            }));
+            setSensorValues(prev => {
+              const newValues = {
+                ...prev,
+                [parsedData.name]: parsedData.value
+              };
+              console.log("Nouvelles valeurs de capteurs:", newValues);
+              return newValues;
+            });
 
             // Ajout du point au graphique
             const newDataPoint = {
@@ -84,16 +101,17 @@ export default function Home() {
             setChartData(prev => {
               const newData = [...prev, newDataPoint];
               // Garder seulement les 50 derniers points pour éviter une surcharge
-              return newData.slice(-50);
+              const result = newData.slice(-50);
+              console.log("Données graphique mises à jour:", result.length, "points");
+              return result;
             });
 
             // Ajout aux données textuelles
-            if (parsedData.raw_data) {
-              setTextData(prev => {
-                const newTextData = [...prev, `[${timestamp}] ${parsedData.raw_data}`];
-                return newTextData.slice(-100); // Limiter à 100 entrées
-              });
-            }
+            setTextData(prev => {
+              const rawDataMessage = parsedData.raw_data || `${parsedData.name},${parsedData.value}`;
+              const newTextData = [...prev, `[${timestamp}] ${rawDataMessage}`];
+              return newTextData.slice(-100); // Limiter à 100 entrées
+            });
 
             // Vérification spécifique pour "status"
             if (parsedData.name === "status") {
@@ -103,9 +121,11 @@ export default function Home() {
                 setStatusMessage("L'autiste ne va pas bien 😟");
               }
             }
+          } else {
+            console.warn("Message reçu sans nom ou valeur:", parsedData);
           }
         } catch (error) {
-          console.error("Erreur de parsing JSON:", error);
+          console.error("Erreur de parsing JSON:", error, "Données brutes:", event.data);
         }
       };
 
@@ -145,7 +165,18 @@ export default function Home() {
     setTextData([]);
     setSensorValues({});
     dataPointIndex.current = 0;
+    setMessageCount(0); // Reset du compteur de debug
     toast.info("Données effacées");
+  };
+
+  // Fonction pour envoyer un message test au serveur
+  const handleTestMessage = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({type: "ping", timestamp: new Date().toISOString()}));
+      toast.info("Message de test envoyé");
+    } else {
+      toast.error("WebSocket non connecté");
+    }
   };
 
   return (
@@ -156,7 +187,10 @@ export default function Home() {
       <div className="w-full max-w-4xl bg-gray-800 p-4 rounded-lg shadow-lg mb-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <p className="mb-2">Statut: <span className={`font-semibold ${status.includes("Connecté") ? "text-green-400" : "text-red-400"}`}>{status}</span></p>
+            <p className="mb-2">
+              Statut: <span className={`font-semibold ${status.includes("Connecté") ? "text-green-400" : "text-red-400"}`}>{status}</span>
+              {" "}<small>({messageCount} messages reçus)</small>
+            </p>
             
             <div className="flex items-center gap-2">
               <input 
@@ -178,6 +212,12 @@ export default function Home() {
               >
                 Effacer données
               </button>
+              <button 
+                onClick={handleTestMessage}
+                className="bg-yellow-600 hover:bg-yellow-700 px-3 py-2 rounded"
+              >
+                Test
+              </button>
             </div>
           </div>
           
@@ -194,12 +234,18 @@ export default function Home() {
       <div className="w-full max-w-4xl bg-gray-800 p-4 rounded-lg shadow-lg mb-6">
         <h2 className="text-xl font-semibold mb-4">📊 Valeurs actuelles</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-          {Object.entries(sensorValues).map(([name, value]) => (
-            <div key={name} className="bg-gray-700 p-3 rounded-lg">
-              <h3 className="font-medium text-gray-300">{name}</h3>
-              <p className="text-2xl font-bold">{typeof value === 'number' ? value.toFixed(2) : value}</p>
+          {Object.keys(sensorValues).length > 0 ? (
+            Object.entries(sensorValues).map(([name, value]) => (
+              <div key={name} className="bg-gray-700 p-3 rounded-lg">
+                <h3 className="font-medium text-gray-300">{name}</h3>
+                <p className="text-2xl font-bold">{typeof value === 'number' ? value.toFixed(2) : value}</p>
+              </div>
+            ))
+          ) : (
+            <div className="bg-gray-700 p-3 rounded-lg col-span-3">
+              <p className="text-gray-400 italic">En attente de données...</p>
             </div>
-          ))}
+          )}
         </div>
       </div>
 
