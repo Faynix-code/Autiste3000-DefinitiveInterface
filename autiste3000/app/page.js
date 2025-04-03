@@ -354,10 +354,10 @@ export default function Home() {
   const getSensorColor = (sensorName) => {
     const colorMap = {
       temperature: "#ff7300",
-      niveau_sonore: "#82ca9d", 
+      niveausonore: "#82ca9d", 
       signal: "#8884d8",
-      accelerationX: "#0088FE",
-      accelerationY: "#00C49F",
+      accelerationx: "#0088FE",
+      accelerationy: "#00C49F",
       status: "#FFBB28"
     };
     
